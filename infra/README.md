@@ -39,7 +39,7 @@ Creates an EKS cluster and one managed node group inside an **existing** VPC and
 - **No implicit admin.** `bootstrap_cluster_creator_admin_permissions = false`, so the identity running Terraform does not become cluster-admin. Only the IAM roles in `cluster_admin_role_arns` (roles, never IAM users) get `AmazonEKSClusterAdminPolicy`. Access entries are managed through the EKS API, so a lost admin is recovered through IAM rather than by editing an `aws-auth` ConfigMap.
 - EKS creates the node role's access entry automatically for managed node groups.
 - **Nodes** have no public IPs and no SSH key. Pods cannot reach IMDS (hop limit 1), so they cannot use the node role; workloads that need AWS access get their own role via IRSA or Pod Identity. If shell access is ever needed, use SSM Session Manager (would require `AmazonSSMManagedInstanceCore`, not attached) or `kubectl debug node/...`.
-- **CI cannot reach the API.** GitHub-hosted runners are outside the VPC. That's fine for validation, which needs no cluster. Deployment options are covered in the root `README.md`.
+- **CI cannot reach the API.** GitHub-hosted runners are outside the VPC. That's fine for validation, which needs no cluster, and for plan and apply, which only call AWS APIs. Deployment options are covered in the root `README.md`.
 
 ## Validate without creating resources
 
@@ -52,7 +52,9 @@ terraform validate
 
 CI runs the same commands, plus Checkov over this directory (`.github/workflows/validate.yml`).
 
-`terraform plan` is the next step but is **not** part of this submission: it needs AWS credentials and real subnet IDs, because the subnet preconditions read the VPC. With a read-only role it would look like this:
+`.github/workflows/terraform.yml` also runs `terraform plan` against moto, a local mock of the AWS API, with a mock VPC and two subnets, so the subnet preconditions run too. On `main` it applies the saved plan only when an AWS account is attached, so apply is off here.
+
+Against real AWS, `terraform plan` needs credentials and real subnet IDs, because the subnet preconditions read the VPC. With a read-only role it looks like this:
 
 ```sh
 cp terraform.tfvars.example terraform.tfvars   # fill in real IDs; file is gitignored

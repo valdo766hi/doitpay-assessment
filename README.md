@@ -6,7 +6,8 @@ PayTrack is an internal payment-reconciliation API. This repository holds the in
 |---|---|---|
 | [`infra/`](infra/README.md) | A | Terraform for the EKS cluster, managed node group and IAM, in an existing VPC |
 | [`k8s/`](k8s/README.md) | B | Namespace, ServiceAccount, ConfigMap, Deployment, Service, PDB (kustomize) |
-| [`.github/workflows/validate.yml`](.github/workflows/validate.yml) | C | PR validation: Terraform, kubeconform, Checkov |
+| [`.github/workflows/validate.yml`](.github/workflows/validate.yml) | C | PR validation: Terraform, kubeconform, Checkov, image build and Trivy scan |
+| [`.github/workflows/terraform.yml`](.github/workflows/terraform.yml) | C | Plan on PRs; on `main`, apply the saved plan after approval (AWS mocked with moto, apply off) |
 | [`troubleshooting/diagnosis.md`](troubleshooting/diagnosis.md) | D | Diagnosis of the intermittent 5xx incident |
 | `app/`, `Dockerfile` | — | Starter app, with security fixes (see Findings) |
 
@@ -37,6 +38,8 @@ The checks below ran locally on 2026-10-28. The same Terraform, kubeconform and 
 |---|---|---|
 | Terraform format | `terraform fmt -check -recursive` | pass |
 | Terraform config | `terraform init -backend=false && terraform validate` (local 1.16.5; CI pins 1.17.0) | pass |
+| Terraform plan, mocked AWS | `terraform plan -out=tfplan` against moto 5.2.4 with a mock VPC and two subnets | 16 to add; subnets in one AZ fail the precondition |
+| Image dependencies | Trivy 0.76.0 on `python:3.12-slim` and the resolved Python packages, fixable HIGH/CRITICAL | none found |
 | Manifests | `kubectl kustomize k8s \| kubeconform -strict -kubernetes-version 1.36.0` | 6/6 valid |
 | IaC security | Checkov 3.3.30 over Terraform, Kubernetes, Dockerfile, workflows | 0 failed, 8 skipped with inline reasons |
 | Workflow lint | `actionlint`, `zizmor` | no findings |
@@ -44,15 +47,17 @@ The checks below ran locally on 2026-10-28. The same Terraform, kubeconform and 
 | Checks fail when they should | A field typo makes kubeconform exit 1; removing `allowPrivilegeEscalation: false` makes Checkov exit 1 (CKV_K8S_20) | pass |
 
 **Not run:**
-- `terraform plan`: needs AWS credentials and real subnets.
+- `terraform plan` and `apply` against real AWS: they need an account. CI plans against moto instead and leaves apply off.
 - `kubectl apply --dry-run=server`: needs a cluster.
-- `docker build` and an image scan: Docker isn't available on my machine.
+- `docker build` locally: Docker isn't available on my machine. CI builds, smoke-tests and scans the image.
 
-**CI design** (`validate.yml`):
-- Three independent jobs, so one failure doesn't hide another and each shows up as a named check.
+**CI design:**
+- `validate.yml` has four independent jobs (Terraform, manifests, Checkov, image), so one failure doesn't hide another and each shows up as a named check.
+- The image job builds the image and runs it with the pod's restrictions (read-only root, no capabilities, non-root). It checks `/`, `/health` and `/ready`, then fails on fixable HIGH or CRITICAL vulnerabilities.
 - Permissions are `contents: read` only. There is no `id-token` and no AWS access.
-- Every action is pinned to a commit SHA, `persist-credentials: false` is set, the kubeconform binary is verified with SHA-256, and the Checkov image is pinned by digest.
+- Every action is pinned to a commit SHA, `persist-credentials: false` is set, the kubeconform binary is verified with SHA-256, and the Checkov, Trivy and moto images are pinned by digest.
 - Checkov exceptions sit inline next to the resource they cover, each with a reason, so a new exception shows up in PR review.
+- `terraform.yml` is separate from validation and is described in section 3.
 
 ## 3. Security and operational trade-offs
 
@@ -67,32 +72,51 @@ The checks below ran locally on 2026-10-28. The same Terraform, kubeconform and 
 | No NetworkPolicy yet | No guessed rules that break traffic | Pod-to-pod traffic is open until the gateway and dependencies are known |
 | On-demand nodes, fixed node count | Predictable, simple | No autoscaling or Spot savings yet |
 
+### Terraform plan and apply (`terraform.yml`, AWS mocked)
+
+```
+pull request ─► plan (moto) ─► plan in the job summary + tfplan artifact
+main         ─► plan (moto) ─► tfplan artifact ─► approval (infra-production) ─► apply tfplan
+```
+
+- **Pull request.** A moto container stands in for AWS, with a mock VPC and two subnets. The plan runs for real, including the subnet preconditions. It is shown in the job summary and saved as an artifact.
+- **Main.** The plan is saved again, and the apply job downloads exactly that file. Required reviewers on the `infra-production` environment gate it. A saved plan changes only what was reviewed, and Terraform refuses it if the state has changed since.
+- **Apply is off.** The brief rules out creating resources, so the apply step runs only when the `TERRAFORM_APPLY` repository variable is `true`.
+- **With a real account:**
+  - OIDC roles replace the dummy credentials. The plan role is read-only, so a PR can't change anything.
+  - The S3 backend with `use_lockfile` replaces local state.
+  - Plans run only for PRs from this repository.
+  - A nightly `plan -detailed-exitcode` reports drift.
+  - Terraform only calls AWS APIs, so GitHub-hosted runners work despite the private endpoint.
+
 ### Deployment (proposal, not implemented)
 
 Validation and deployment stay separate. A `deploy.yml` would run only on `main` after validation passes:
 
-1. **Build and push.** Build the image, scan it (e.g. Trivy), and push it to ECR. Credentials come from GitHub OIDC (`id-token: write`) and `aws-actions/configure-aws-credentials`, assuming a role whose trust policy pins `aud = sts.amazonaws.com` and `sub = repo:<org>/<repo>:environment:production`. There are no long-lived keys.
+1. **Push.** The image job in `validate.yml` already builds, smoke-tests and scans the image. On `main`, the deploy workflow pushes it to ECR by digest. Credentials come from GitHub OIDC (`id-token: write`) and `aws-actions/configure-aws-credentials`, assuming a role whose trust policy pins `aud = sts.amazonaws.com` and `sub = repo:<org>/<repo>:environment:production`. There are no long-lived keys.
 2. **Deploy.** The job uses `environment: production` with required reviewers and a `main`-only deployment branch rule. The deploy role gets a namespace-scoped access entry (`AmazonEKSEditPolicy` on `paytrack` only), not cluster-admin. Because the endpoint is private, this job runs on a runner inside the VPC, such as a self-hosted runner or a CodeBuild-hosted GitHub runner.
 3. **Alternative.** A pull-based GitOps controller (Argo CD or Flux) in the cluster would avoid exposing the API to CI at all. It's an extra component for a small team to run, so it's a decision for the platform team.
 
 ## 4. Not finished, and why
 
 - **Deployment workflow.** Proposal only (above); it depends on the runner and network choice.
+- **Real plan and apply.** `terraform.yml` runs against a mock; connecting it needs an AWS account.
 - **Next steps, in priority order:**
   1. NetworkPolicy, once the gateway and downstream addresses are known.
   2. Move the CNI policy to IRSA/Pod Identity, and manage `vpc-cni`, `kube-proxy` and `coredns` as EKS managed add-ons.
-  3. Image build and vulnerability scan in CI.
-  4. A read-only `terraform plan` in CI via OIDC.
+  3. Connect `terraform.yml` to AWS: OIDC roles, S3 state, nightly drift plan.
+  4. Push images to ECR by digest, and add the deploy job.
   5. Node autoscaling (Karpenter or Cluster Autoscaler) and an HPA once there is load data.
   6. Alerts on 5xx rate and failed rollouts.
 
 ## 5. Use of AI and other tools
 
-I used Claude Code to draft the configuration and to run the checks. Other sources: AWS EKS documentation, the Terraform and PyPI registries, Terraform, kubeconform, Checkov, actionlint and zizmor. I reviewed every file and checked version-sensitive claims against primary sources rather than model memory.
+I used Claude Code to draft the configuration and to run the checks. Other sources: AWS EKS documentation, the Terraform and PyPI registries, Terraform, kubeconform, Checkov, Trivy, moto, actionlint and zizmor. I reviewed every file and checked version-sensitive claims against primary sources rather than model memory.
 
 - **Verified:** Kubernetes version. The starter left a placeholder. The AWS EKS version page (2026-10-28) shows 1.34–1.37 in standard support; I chose 1.36 for the reason in section 1.
 - **Changed:** node ECR policy. The common suggestion is `AmazonEC2ContainerRegistryReadOnly`. Current AWS docs recommend the narrower `AmazonEC2ContainerRegistryPullOnly`, so I used that.
 - **Changed:** Checkov suppressions. The first draft put `#checkov:skip` comments above the resource blocks. A test showed Checkov ignores a comment there (the check still failed, 0 skipped), so I moved them inside the blocks and confirmed the scan reports them as skipped.
+- **Changed:** image scan. The usual suggestion is `aquasecurity/trivy-action`. Its tags were force-pushed to malicious code in March 2026 (CVE-2026-33634), so the scan runs from a digest-pinned Trivy image instead.
 - **Rejected:** Checkov `CKV_DOCKER_2` (add a `HEALTHCHECK`). Kubernetes ignores Docker `HEALTHCHECK`, and the probes in the Deployment cover it. Suppressed with that reason.
 - **Rejected:** overriding Nix's insecure-package block to install Checkov (its nixpkgs build pulled in a flagged `ecdsa` dependency). I ran the pinned PyPI release instead, the same version as the CI image.
 - **Kept with mitigation:** AWS docs recommend moving `AmazonEKS_CNI_Policy` to a dedicated role. I kept it on the node role for a simpler bootstrap and documented the trade-off and follow-up (section 3).
