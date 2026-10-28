@@ -1,0 +1,17 @@
+# Assessment brief and source archive stay out of the (public) repository.
+*.docx
+~$*
+*.zip
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+*.tfvars
+!*.tfvars.example
+backend.hcl
+
+.DS_Store
+__pycache__/
