@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paytrack-api
+  namespace: paytrack
+  labels:
+    app.kubernetes.io/name: paytrack-api
+    app.kubernetes.io/part-of: paytrack
+  annotations:
+    checkov.io/skip1: CKV_K8S_43=Deploy pipeline pins the image by digest with kustomize edit set image; the tag here is a placeholder.
+    checkov.io/skip2: CKV_K8S_15=IfNotPresent is safe with immutable ECR tags/digests and avoids a registry round-trip on every start.
+    checkov.io/skip3: CKV_K8S_11=No CPU limit on purpose; CFS throttling causes latency spikes and probe timeouts. CPU request reserves capacity.
+    checkov.io/skip4: CKV2_K8S_6=NetworkPolicy deferred until the gateway source and downstream dependencies are confirmed (see k8s/README.md).
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  # A stuck rollout is reported as failed (ProgressDeadlineExceeded) instead of hanging silently.
+  progressDeadlineSeconds: 300
+  minReadySeconds: 10
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: paytrack-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Keep full ready capacity: an old pod is removed only after a new one is Ready.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: paytrack-api
+        app.kubernetes.io/part-of: paytrack
+    spec:
+      serviceAccountName: paytrack-api
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: paytrack-api
+      containers:
+        - name: api
+          image: 111122223333.dkr.ecr.ap-southeast-3.amazonaws.com/paytrack-api:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: paytrack-api
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 256Mi
+          # Liveness only starts after startup succeeds, so slow starts are not killed.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 12
+          # Readiness gates Service traffic; liveness only restarts a hung process.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            # Give the gateway time to stop routing to this pod before SIGTERM.
+            preStop:
+              sleep:
+                seconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

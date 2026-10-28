@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: paytrack
+  labels:
+    app.kubernetes.io/part-of: paytrack
+    # enforce rejects non-compliant Pods; warn also flags them when the Deployment is applied.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted

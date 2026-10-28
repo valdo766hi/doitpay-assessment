@@ -1,0 +1,15 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: paytrack-api
+  namespace: paytrack
+  labels:
+    app.kubernetes.io/name: paytrack-api
+    app.kubernetes.io/part-of: paytrack
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: paytrack-api
+  # Let node drains evict crash-looping pods instead of blocking on them.
+  unhealthyPodEvictionPolicy: AlwaysAllow
