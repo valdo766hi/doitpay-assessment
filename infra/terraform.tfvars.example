@@ -1,13 +1,30 @@
-aws_region = "ap-southeast-3"
+# Example only; replace placeholders with values supplied by the platform team.
+# Copy to terraform.tfvars (gitignored). No credentials belong in this file.
+aws_region   = "ap-southeast-3"
+environment  = "sandbox"
 cluster_name = "paytrack-sandbox"
+
 vpc_id = "vpc-REPLACE_WITH_EXISTING_ID"
 private_subnet_ids = [
   "subnet-REPLACE_WITH_PRIVATE_SUBNET_A",
   "subnet-REPLACE_WITH_PRIVATE_SUBNET_B"
 ]
-kubernetes_version = "REPLACE_WITH_SUPPORTED_VERSION"
+
+kubernetes_version = "1.36"
+
+# Networks routed into the VPC that may reach the private API endpoint.
+cluster_endpoint_allowed_cidrs = ["10.100.0.0/16"] # e.g. corporate VPN range
+
+# Roles granted cluster-admin via EKS access entries.
+cluster_admin_role_arns = [
+  "arn:aws:iam::111122223333:role/REPLACE_WITH_PLATFORM_ADMIN_ROLE"
+]
+
 node_instance_types = ["t3.medium"]
-desired_size = 2
-min_size = 2
-max_size = 4
-environment = "sandbox"
+desired_size        = 2
+min_size            = 2
+max_size            = 4
+
+tags = {
+  Owner = "platform-team"
+}
