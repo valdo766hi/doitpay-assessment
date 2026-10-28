@@ -20,4 +20,5 @@ def index():
 
 if __name__ == "__main__":
     # Development entrypoint only; production should use a production WSGI server.
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")), debug=True)
+    # Debug mode exposes the Werkzeug debugger (remote code execution); opt in with FLASK_DEBUG=1.
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
