@@ -1,7 +1,7 @@
 name: validate
 
-# Validation only: no AWS credentials, no id-token, no deploy. Deployment would
-# live in a separate workflow behind a protected environment (see README.md).
+# Validation only: no AWS credentials, no id-token, no deploy. Plan and apply are
+# in terraform.yml; deployment would be a separate workflow (see README.md).
 on:
   pull_request:
   push:
@@ -21,6 +21,7 @@ env:
   KUBECONFORM_VERSION: v0.8.0
   KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
   CHECKOV_IMAGE: bridgecrew/checkov:3.3.30@sha256:4b65e89f1fde292249fc0aa0d0db43302c036dfe39f7370b2d3517571082b894
+  TRIVY_IMAGE: aquasec/trivy:0.76.0@sha256:2416d1f74045b57274df1a340eee6b510cacd73c66a6ccb8da092b117eb7d222
 
 jobs:
   terraform:
@@ -88,3 +89,40 @@ jobs:
           --directory /repo
           --framework terraform kubernetes dockerfile github_actions
           --compact --quiet
+
+  image:
+    name: Container image (build, smoke test, Trivy)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: docker build
+        run: docker build --tag paytrack-api:ci .
+
+      # Same restrictions as the pod: read-only root with a writable /tmp, no
+      # capabilities, no privilege escalation, and the image's non-root user.
+      - name: Smoke test
+        run: |
+          docker run --detach --name app --publish 8080:8080 \
+            --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
+            paytrack-api:ci
+          for path in / /health /ready; do
+            curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 1 "http://localhost:8080${path}"
+            echo
+          done
+
+      - name: Container logs
+        if: failure()
+        run: docker logs app
+
+      # Trivy runs from a digest-pinned image, not trivy-action: that action's tags
+      # were force-pushed to malicious code in March 2026 (CVE-2026-33634).
+      - name: Trivy scan (fixable HIGH and CRITICAL fail the job)
+        run: |
+          docker save --output image.tar paytrack-api:ci
+          docker run --rm --volume "${PWD}:/work" --workdir /work "${TRIVY_IMAGE}" \
+            image --input image.tar --scanners vuln --severity HIGH,CRITICAL \
+            --ignore-unfixed --exit-code 1 --no-progress
