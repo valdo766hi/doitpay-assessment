@@ -7,7 +7,7 @@ PayTrack is an internal payment-reconciliation API. This repository holds the in
 | [`infra/`](infra/README.md) | A | Terraform for the EKS cluster, managed node group and IAM, in an existing VPC |
 | [`k8s/`](k8s/README.md) | B | Namespace, ServiceAccount, ConfigMap, Deployment, Service, PDB (kustomize) |
 | [`.github/workflows/validate.yml`](.github/workflows/validate.yml) | C | PR validation: Terraform, kubeconform, Checkov |
-| `troubleshooting/` | D | Incident artifacts; diagnosis to be added as `troubleshooting/diagnosis.md` |
+| [`troubleshooting/diagnosis.md`](troubleshooting/diagnosis.md) | D | Diagnosis of the intermittent 5xx incident |
 | `app/`, `Dockerfile` | — | Starter app, with security fixes (see Findings) |
 
 ## Findings in the starter repository
@@ -31,7 +31,7 @@ PayTrack is an internal payment-reconciliation API. This repository holds the in
 
 ## 2. Validating without creating cloud resources
 
-The checks below ran locally on 2026-10-28, and the same ones run in CI on every pull request and on pushes to `main`. CI has not run yet because nothing has been pushed.
+The checks below ran locally on 2026-10-28. The same Terraform, kubeconform and Checkov checks run in CI on every pull request and on pushes to `main`, and they passed on the first push.
 
 | Check | Command | Result |
 |---|---|---|
@@ -77,7 +77,6 @@ Validation and deployment stay separate. A `deploy.yml` would run only on `main`
 
 ## 4. Not finished, and why
 
-- **Part D diagnosis.** Pending; I prioritised A, B, C and this write-up first.
 - **Deployment workflow.** Proposal only (above); it depends on the runner and network choice.
 - **Next steps, in priority order:**
   1. NetworkPolicy, once the gateway and downstream addresses are known.
