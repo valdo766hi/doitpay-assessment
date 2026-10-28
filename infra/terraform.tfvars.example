@@ -1,0 +1,13 @@
+aws_region = "ap-southeast-3"
+cluster_name = "paytrack-sandbox"
+vpc_id = "vpc-REPLACE_WITH_EXISTING_ID"
+private_subnet_ids = [
+  "subnet-REPLACE_WITH_PRIVATE_SUBNET_A",
+  "subnet-REPLACE_WITH_PRIVATE_SUBNET_B"
+]
+kubernetes_version = "REPLACE_WITH_SUPPORTED_VERSION"
+node_instance_types = ["t3.medium"]
+desired_size = 2
+min_size = 2
+max_size = 4
+environment = "sandbox"
