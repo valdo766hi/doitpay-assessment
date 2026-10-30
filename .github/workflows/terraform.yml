@@ -1,8 +1,11 @@
 name: terraform
 
 # Plan on every pull request; on main, apply exactly the saved plan after approval.
-# No AWS account is attached to this repository, so the plan runs against moto (a
-# local mock of the AWS API) and the apply step stays off. See README.md section 3.
+# Written for a real AWS account and switched off: both jobs run only when the
+# AWS_ACCOUNT_READY repository variable is "true". Turn it on in this order:
+#   1. required reviewers on the infra-production environment (approval first),
+#   2. the OIDC roles, state bucket and inputs as repository variables,
+#   3. AWS_ACCOUNT_READY = true.
 on:
   pull_request:
     paths: ["infra/**", ".github/workflows/terraform.yml"]
@@ -20,22 +23,20 @@ concurrency:
 
 env:
   TERRAFORM_VERSION: 1.17.0
+  AWS_REGION: ap-southeast-3
 
 jobs:
   plan:
-    name: Terraform plan (mocked AWS)
+    name: Terraform plan
+    # Fork pull requests never get AWS credentials: a plan can run code from the PR.
+    if: >-
+      vars.AWS_ACCOUNT_READY == 'true' &&
+      (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    services:
-      moto:
-        image: motoserver/moto:5.2.4@sha256:120b1589c6df7e35d2092935f6ff724486bb2c4189d0e36ce795baba1400ffd2
-        ports: ["5000:5000"]
-    env:
-      # Dummy credentials: every AWS call goes to the moto container.
-      AWS_ACCESS_KEY_ID: mock
-      AWS_SECRET_ACCESS_KEY: mock
-      AWS_REGION: ap-southeast-3
-      AWS_ENDPOINT_URL: http://localhost:5000
+    permissions:
+      contents: read
+      id-token: write # GitHub OIDC token, exchanged for short-lived AWS credentials
     defaults:
       run:
         working-directory: infra
@@ -44,33 +45,36 @@ jobs:
         with:
           persist-credentials: false
 
+      # Read-only role, so a pull request cannot change anything.
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
 
-      # Stands in for the platform team's VPC, so the subnet preconditions really run.
-      - name: Create mock VPC and subnets
-        run: |
-          vpc=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --query Vpc.VpcId --output text)
-          a=$(aws ec2 create-subnet --vpc-id "$vpc" --cidr-block 10.0.1.0/24 --availability-zone ap-southeast-3a --query Subnet.SubnetId --output text)
-          b=$(aws ec2 create-subnet --vpc-id "$vpc" --cidr-block 10.0.2.0/24 --availability-zone ap-southeast-3b --query Subnet.SubnetId --output text)
-          echo "VPC_ID=$vpc" >> "$GITHUB_ENV"
-          echo "SUBNET_IDS=[\"$a\",\"$b\"]" >> "$GITHUB_ENV"
+      # Real *.tfvars files are gitignored; the non-secret inputs (VPC, subnets,
+      # admin roles) come from a repository variable instead.
+      - name: Write terraform.tfvars
+        env:
+          TFVARS: ${{ vars.TERRAFORM_TFVARS }}
+        run: printf '%s\n' "$TFVARS" > terraform.tfvars
 
-      # With an AWS account this is the S3 backend (terraform init -backend-config=...).
-      - name: Use local state
-        run: printf 'terraform {\n  backend "local" {}\n}\n' > backend_override.tf
-
-      - name: terraform init
-        run: terraform init -input=false -lockfile=readonly
+      - name: terraform init (S3 state)
+        env:
+          STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: >-
+          terraform init -input=false -lockfile=readonly
+          -backend-config="bucket=${STATE_BUCKET}"
+          -backend-config="key=paytrack/sandbox/eks.tfstate"
+          -backend-config="region=${AWS_REGION}"
+          -backend-config="use_lockfile=true"
 
       - name: terraform plan
-        run: >-
-          terraform plan -input=false -out=tfplan
-          -var-file=terraform.tfvars.example
-          -var "vpc_id=${VPC_ID}"
-          -var "private_subnet_ids=${SUBNET_IDS}"
+        run: terraform plan -input=false -out=tfplan
 
       - name: Plan summary
         run: |
@@ -80,8 +84,8 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # A plan file can hold sensitive values: with a real account, keep it out of a
-      # public repository's artifacts (private repo or encrypted upload).
+      # A plan file can hold sensitive values: keep the repository private, or
+      # encrypt the file before upload, once it plans against a real account.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tfplan
@@ -91,12 +95,15 @@ jobs:
 
   apply:
     name: Terraform apply (saved plan)
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && vars.AWS_ACCOUNT_READY == 'true'
     needs: plan
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     # Required reviewers on this environment make a person approve before apply.
     environment: infra-production
+    permissions:
+      contents: read
+      id-token: write # GitHub OIDC token for the apply role
     defaults:
       run:
         working-directory: infra
@@ -104,6 +111,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # Apply role: its trust policy allows only the infra-production environment.
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
@@ -115,18 +128,19 @@ jobs:
           name: tfplan
           path: infra
 
-      - name: Use local state
-        run: printf 'terraform {\n  backend "local" {}\n}\n' > backend_override.tf
-
-      - name: terraform init
-        run: terraform init -input=false -lockfile=readonly
+      - name: terraform init (S3 state)
+        env:
+          STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: >-
+          terraform init -input=false -lockfile=readonly
+          -backend-config="bucket=${STATE_BUCKET}"
+          -backend-config="key=paytrack/sandbox/eks.tfstate"
+          -backend-config="region=${AWS_REGION}"
+          -backend-config="use_lockfile=true"
 
       - name: Show the plan to apply
         run: terraform show -no-color tfplan
 
-      # Off by design: the brief rules out creating resources. With an AWS account,
-      # add OIDC credentials (id-token: write) and the S3 backend, then set the
-      # TERRAFORM_APPLY repository variable to true.
-      - name: terraform apply
-        if: vars.TERRAFORM_APPLY == 'true'
+      # Applies exactly the reviewed plan; Terraform rejects it if the state changed since.
+      - name: terraform apply (saved plan)
         run: terraform apply -input=false tfplan
